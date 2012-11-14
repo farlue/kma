@@ -72,7 +72,7 @@ typedef struct p2fl_header
 
 typedef struct k_freelist
 {
-	int pageUsed;
+	int pagesUsed;
 	int spaceUsed;
 	kma_size_t freespaceSize;
 	void* freespacePtr;
@@ -175,7 +175,7 @@ cleanupKFL()
 	{
 		kflHeader_t* tempKflPtr = kflPtr;
 		kpage_t* tempPagePtr = NULL;
-		int i = tempKflPtr->pageUsed+1;
+		int i = tempKflPtr->pagesUsed+1;
 		while(i>0)
 		{
 			tempPagePtr = *((kpage_t**)((void*)tempKflPtr - sizeof(kpage_t*)));
@@ -194,7 +194,7 @@ int initKFL(kma_size_t size)
 
 	*((kpage_t**)page->ptr) = page;
 
-	if((size + sizeof(kpage_t*) + sizeof(kflHeader_t) > page->size))
+	if((size + sizeof(kpage_t*) + sizeof(kflHeader_t)) > page->size)
 	{
 		free_page(page);
 		return -1;
@@ -210,13 +210,13 @@ int initKFL(kma_size_t size)
 	if(kflPtr == NULL)
 	{
 		preKflPtr = NULL;
-		curKflPtr->pageUsed = 0;
+		curKflPtr->pagesUsed = 0;
 		curKflPtr->spaceUsed = 0;	
 	}
 	else
 	{
 		preKflPtr = kflPtr;
-		curKflPtr->pageUsed = preKflPtr->pageUsed + 1;
+		curKflPtr->pagesUsed = preKflPtr->pagesUsed + 1;
 		curKflPtr->spaceUsed = preKflPtr->spaceUsed;
 	}
 	
