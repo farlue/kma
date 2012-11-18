@@ -64,6 +64,19 @@
 #define BUFSIZE3 1<<12
 #define BUFSIZE4 MAXSPACE 
 #define MAXSPACE (PAGESIZE - sizeof(kpage_t*) - sizeof(mck2Header_t))
+#define NDX(size) \
+					(size > BUFSIZE2) \
+					? (size > BUFSIZE3) ? 4 : 3 \
+					: (size > BUFSIZE1) \
+						? 2	\
+						: (size > BUFSIZE0) ? 1 : 0;
+	
+#define SPACE(idx) \
+					(idx > 2) \
+					? (idx > 3) ? BUFSIZE4 : BUFSIZE3 \
+					: (idx > 1) \
+						? BUFSIZE2 \
+						: (idx > 0) ? BUFSIZE1: BUFSIZE0;
 
 typedef struct
 {
@@ -87,6 +100,7 @@ mck2Header_t* mck2Ptr = NULL;
 int initMck2(kma_size_t);
 int roundup(kma_size_t);
 kma_size_t convertIdxToSize(int);
+void interpretRequest(kma_size_t, int*, kma_size_t*);
 
 /************External Declaration*****************************************/
 
@@ -111,8 +125,11 @@ kma_malloc(kma_size_t size)
 		}
 	}
 
-	int index = roundup(size);
-	kma_size_t reqSpace = convertIdxToSize(index);
+	int index;
+	kma_size_t reqSpace;
+	index = NDX(size);
+	reqSpace = SPACE(index);
+//	interpretRequest(size, &index, &reqSpace);
 	bufHeader_t* bufPtr = NULL;
 
 //	printf("size: %d\tindex: %d\t request space: %d\n", size, index, reqSpace);
@@ -139,8 +156,12 @@ kma_malloc(kma_size_t size)
 void
 kma_free(void* ptr, kma_size_t size)
 {
-  int index = roundup(size);
-	kma_size_t reqSpace = convertIdxToSize(index);
+  int index;
+	kma_size_t reqSpace;
+  index = NDX(size);
+	reqSpace = SPACE(index);
+//	interpretRequest(size, &index, &reqSpace);
+
 	bufHeader_t* bufPtr = (bufHeader_t*)ptr;
 	bufPtr->ptr = mck2Ptr->freelistArr[index].ptr;
 	mck2Ptr->freelistArr[index].ptr = bufPtr;
@@ -164,8 +185,12 @@ kma_free(void* ptr, kma_size_t size)
 
 int initMck2(kma_size_t size)
 {
-	int index = roundup(size);
-	kma_size_t reqSpace = convertIdxToSize(index);
+	int index;
+	kma_size_t reqSpace;
+	index = NDX(size);
+	reqSpace = SPACE(index);
+//	interpretRequest(size, &index, &reqSpace);
+
 
 	kpage_t* page;
 	page = get_page();
@@ -201,11 +226,27 @@ int initMck2(kma_size_t size)
 	}
 
 	bufHeader_t* tempBufPtr = (bufHeader_t*)((void*)curMck2Ptr	+ sizeof(mck2Header_t));
-	for(i=1; i*reqSpace<=MAXSPACE; ++i)
+/*
+ 	for(i=1; i*reqSpace<=MAXSPACE; ++i)
 	{
 		tempBufPtr->ptr = curMck2Ptr->freelistArr[index].ptr;
 		curMck2Ptr->freelistArr[index].ptr = tempBufPtr;
 		tempBufPtr = (bufHeader_t*)((void*)tempBufPtr + reqSpace);
+	}
+*/
+	kma_size_t totalSpace = 0;
+	while (index >= 0)
+	{
+//		reqSpace = convertIdxToSize(index);
+		reqSpace = SPACE(index);
+		while (totalSpace+reqSpace <= MAXSPACE)
+		{
+			tempBufPtr->ptr = curMck2Ptr->freelistArr[index].ptr;
+			curMck2Ptr->freelistArr[index].ptr = tempBufPtr;
+			tempBufPtr = (bufHeader_t*)((void*)tempBufPtr + reqSpace);
+			totalSpace += reqSpace;
+		}
+		index--;
 	}
 	mck2Ptr = curMck2Ptr;
 	return 0;
@@ -236,5 +277,36 @@ int roundup(kma_size_t size)
 					: (size > BUFSIZE1) \
 						? 2	\
 						: (size > BUFSIZE0) ? 1 : 0;	
+}
+
+void interpretRequest(kma_size_t size, int* idxPtr, kma_size_t* reqSpacePtr)
+{
+/*	*idxPtr = (size > BUFSIZE2) \
+					? (size > BUFSIZE3) ? 4 : 3 \
+					: (size > BUFSIZE1) \
+						? 2	\
+						: (size > BUFSIZE0) ? 1 : 0;	
+*/
+	*idxPtr = NDX(size);
+
+	switch(*idxPtr)
+	{
+		case 0:
+			*reqSpacePtr = (kma_size_t) BUFSIZE0;
+			break;
+		case 1:
+			*reqSpacePtr = (kma_size_t) BUFSIZE1;
+			break;
+		case 2:
+			*reqSpacePtr = (kma_size_t) BUFSIZE2;
+			break;
+		case 3:
+			*reqSpacePtr = (kma_size_t) BUFSIZE3;
+			break;
+		case 4:
+		default:
+			*reqSpacePtr = (kma_size_t) BUFSIZE4;
+			break;
+	}
 }
 #endif // KMA_MCK2
