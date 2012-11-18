@@ -77,18 +77,22 @@
 					: (idx > 1) \
 						? BUFSIZE2 \
 						: (idx > 0) ? BUFSIZE1: BUFSIZE0;
+#define PAGEOFFSET 0x1fff
+#define MASKOFFSET ~PAGEOFFSET
 
-typedef struct
+typedef struct buf_header
 {
 	void* ptr;
 } bufHeader_t;
 
-typedef struct
+typedef struct mck2_header
 {
 	kma_size_t size;
 	int used;
-	int pagesUsed;
-	bufHeader_t freelistArr[MAXSET];
+	struct mck2_header* prePagePtr;
+	struct mck2_header* nextPagePtr;
+	bufHeader_t* bufferPtr;
+//	struct mck2_header* pagelist[MAXSET];
 } mck2Header_t;
 
 /************Global Variables*********************************************/
@@ -97,6 +101,8 @@ mck2Header_t* mck2Ptr = NULL;
 
 /************Function Prototypes******************************************/
 
+mck2Header_t* searchPage(void*);
+mck2Header_t* searchFreelist(kma_size_t);
 int initMck2(kma_size_t);
 int roundup(kma_size_t);
 kma_size_t convertIdxToSize(int);
@@ -134,19 +140,21 @@ kma_malloc(kma_size_t size)
 
 //	printf("size: %d\tindex: %d\t request space: %d\n", size, index, reqSpace);
 	bool reqNewPage;
+	mck2Header_t* tempMck2Ptr;
 
 	do{
 		reqNewPage = FALSE;
-		if(mck2Ptr->freelistArr[index].ptr == NULL)
+		tempMck2Ptr = searchFreelist(reqSpace);
+		if(tempMck2Ptr == NULL)
 		{
 			initMck2(size);
 			reqNewPage = TRUE;
 		}
 		else
 		{
-			bufPtr = mck2Ptr->freelistArr[index].ptr;
-			mck2Ptr->freelistArr[index].ptr = bufPtr->ptr;
-			mck2Ptr->used += reqSpace;
+			bufPtr = tempMck2Ptr->bufferPtr;
+			tempMck2Ptr->bufferPtr = bufPtr->ptr;
+			tempMck2Ptr->used += reqSpace;
 			return (void*)bufPtr;
 		}
 	} while(reqNewPage);
@@ -156,31 +164,81 @@ kma_malloc(kma_size_t size)
 void
 kma_free(void* ptr, kma_size_t size)
 {
-  int index;
-	kma_size_t reqSpace;
-  index = NDX(size);
-	reqSpace = SPACE(index);
-//	interpretRequest(size, &index, &reqSpace);
-
-	bufHeader_t* bufPtr = (bufHeader_t*)ptr;
-	bufPtr->ptr = mck2Ptr->freelistArr[index].ptr;
-	mck2Ptr->freelistArr[index].ptr = bufPtr;
-	mck2Ptr->used -= reqSpace;
-
-	if(mck2Ptr->used == 0)
+	mck2Header_t* tempMck2Ptr = searchPage(ptr);
+	if(tempMck2Ptr == NULL)
 	{
-		int i = mck2Ptr->pagesUsed + 1;
-		mck2Header_t* tempMck2Ptr = mck2Ptr;
-		kpage_t* tempPagePtr = NULL;
-		while(i > 0)
+		printf("ERROR: cannot find the return address!\n");
+	}
+	else
+	{
+		int index = NDX(size);
+		kma_size_t reqSpace = SPACE(index);
+		bufHeader_t* bufPtr = (bufHeader_t*)ptr;
+		bufPtr->ptr = tempMck2Ptr->bufferPtr;
+		tempMck2Ptr->bufferPtr = bufPtr;
+		tempMck2Ptr->used -= reqSpace;
+
+		if(tempMck2Ptr->used == 0)
 		{
+			mck2Header_t* tempPtr;
+			kpage_t* tempPagePtr;
+			if((tempMck2Ptr->prePagePtr == NULL) && (tempMck2Ptr->nextPagePtr != NULL))
+			{
+				tempPtr = tempMck2Ptr->nextPagePtr;
+				tempPtr->prePagePtr = NULL;
+			}
+			else if((tempMck2Ptr->prePagePtr != NULL) && (tempMck2Ptr->nextPagePtr == NULL))
+			{
+				tempPtr = tempMck2Ptr->prePagePtr;
+				tempPtr->nextPagePtr = NULL;
+				mck2Ptr = tempPtr;
+			}
+			else if((tempMck2Ptr->prePagePtr != NULL) && (tempMck2Ptr->nextPagePtr != NULL))
+			{
+				tempPtr = tempMck2Ptr->prePagePtr;
+				tempPtr->nextPagePtr = tempMck2Ptr->nextPagePtr;
+				tempPtr = tempMck2Ptr->nextPagePtr;
+				tempPtr->prePagePtr = tempMck2Ptr->prePagePtr;
+			}
+			else if((tempMck2Ptr->prePagePtr == NULL) && (tempMck2Ptr->nextPagePtr == NULL))
+			{
+				mck2Ptr = NULL;
+			}
 			tempPagePtr = *((kpage_t**)((void*)tempMck2Ptr - sizeof(kpage_t*)));
 			free_page(tempPagePtr);
-			tempMck2Ptr = (mck2Header_t*)((void*)tempMck2Ptr - PAGESIZE);
-			i--;
 		}
-		mck2Ptr = NULL;		
 	}
+}
+
+mck2Header_t* searchPage(void* ptr)
+{
+	mck2Header_t* curMck2Ptr = mck2Ptr;
+	unsigned long baseAddr;
+	unsigned long bufAddr = (unsigned long)ptr;
+	while(curMck2Ptr != NULL)
+	{
+		baseAddr = (unsigned long)curMck2Ptr;
+		if((baseAddr>>13) == (bufAddr>>13))
+		{
+			return curMck2Ptr;
+		}
+		curMck2Ptr = curMck2Ptr->prePagePtr;
+	}
+	return NULL;
+}
+
+mck2Header_t* searchFreelist(kma_size_t reqSpace)
+{
+	mck2Header_t* curMck2Ptr = mck2Ptr;
+	while(curMck2Ptr != NULL)
+	{
+		if((curMck2Ptr->size == reqSpace) && (curMck2Ptr->bufferPtr != NULL))
+		{
+			return curMck2Ptr;
+		}
+		curMck2Ptr = curMck2Ptr->prePagePtr;
+	}	
+	return NULL;
 }
 
 int initMck2(kma_size_t size)
@@ -205,36 +263,32 @@ int initMck2(kma_size_t size)
 	mck2Header_t* curMck2Ptr = (mck2Header_t*)((void*)page->ptr + sizeof(kpage_t*));
 	mck2Header_t* preMck2Ptr = mck2Ptr;
 	curMck2Ptr->size = reqSpace;
-	
+	curMck2Ptr->used = 0;
+	curMck2Ptr->bufferPtr = NULL;
+
 	if(mck2Ptr == NULL)
 	{
-		curMck2Ptr->used = 0;
-		curMck2Ptr->pagesUsed = 0;
+		curMck2Ptr->prePagePtr = NULL;
+		curMck2Ptr->nextPagePtr = NULL;
 	}
 	else
 	{
-		curMck2Ptr->used = preMck2Ptr->used;
-		curMck2Ptr->pagesUsed = preMck2Ptr->pagesUsed + 1;
-	}
-	int i;
-	for(i=0; i<MAXSET; ++i)
-	{
-		if(mck2Ptr == NULL)
-			curMck2Ptr->freelistArr[i].ptr = NULL;
-		else
-			curMck2Ptr->freelistArr[i].ptr = preMck2Ptr->freelistArr[i].ptr;
+		curMck2Ptr->prePagePtr = preMck2Ptr;
+		curMck2Ptr->nextPagePtr = NULL;
+		preMck2Ptr->nextPagePtr = curMck2Ptr;
 	}
 
 	bufHeader_t* tempBufPtr = (bufHeader_t*)((void*)curMck2Ptr	+ sizeof(mck2Header_t));
-/*
- 	for(i=1; i*reqSpace<=MAXSPACE; ++i)
-	{
-		tempBufPtr->ptr = curMck2Ptr->freelistArr[index].ptr;
-		curMck2Ptr->freelistArr[index].ptr = tempBufPtr;
-		tempBufPtr = (bufHeader_t*)((void*)tempBufPtr + reqSpace);
-	}
-*/
 	kma_size_t totalSpace = 0;
+	while (totalSpace+reqSpace <= MAXSPACE)
+	{
+		tempBufPtr->ptr = curMck2Ptr->bufferPtr;
+		curMck2Ptr->bufferPtr = tempBufPtr;
+		tempBufPtr = (bufHeader_t*)((void*)tempBufPtr + reqSpace);
+		totalSpace += reqSpace;
+	}
+	
+/*
 	while (index >= 0)
 	{
 //		reqSpace = convertIdxToSize(index);
@@ -248,6 +302,7 @@ int initMck2(kma_size_t size)
 		}
 		index--;
 	}
+*/
 	mck2Ptr = curMck2Ptr;
 	return 0;
 }
