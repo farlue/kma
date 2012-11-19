@@ -56,8 +56,61 @@
 
 #define FALSE 0
 #define TRUE	1
-#define MAXSET 5 
 #define MAXSPACE (PAGESIZE - sizeof(kpage_t*) - sizeof(kflHeader_t) - sizeof(bufHeader_t))
+/*
+#define MAXSET 5 
+#define BUFSIZE0 1<<8
+#define BUFSIZE1 1<<9
+#define BUFSIZE2 1<<11
+#define BUFSIZE3 1<<12
+#define BUFSIZE4 MAXSPACE 
+#define NDX(size) \
+					(size > BUFSIZE2) \
+					? (size > BUFSIZE3) ? 4 : 3 \
+					: (size > BUFSIZE1) \
+						? 2	\
+						: (size > BUFSIZE0) ? 1 : 0;
+	
+#define SPACE(idx) \
+					(idx > 2) \
+					? (idx > 3) ? BUFSIZE4 : BUFSIZE3 \
+					: (idx > 1) \
+						? BUFSIZE2 \
+						: (idx > 0) ? BUFSIZE1: BUFSIZE0;
+*/
+#define MAXSET 9
+#define BUFSIZE0 1<<5
+#define BUFSIZE1 1<<6
+#define BUFSIZE2 1<<7
+#define BUFSIZE3 1<<8
+#define BUFSIZE4 1<<9
+#define BUFSIZE5 1<<10
+#define BUFSIZE6 1<<11
+#define BUFSIZE7 1<<12
+#define BUFSIZE8 MAXSPACE 
+#define NDX(size) \
+					(size < BUFSIZE0) ? 0 \
+				: (size < BUFSIZE1) ? 1 \
+				: (size < BUFSIZE2) ? 2 \
+				: (size < BUFSIZE3) ? 3 \
+				: (size < BUFSIZE4) ? 4 \
+				: (size < BUFSIZE5) ? 5 \
+				: (size < BUFSIZE6) ? 6 \
+				: (size < BUFSIZE7) ? 7 \
+				: 8;
+
+#define SPACE(idx) \
+					(idx == 0) ? BUFSIZE0 \
+				:	(idx == 1) ? BUFSIZE1 \
+				:	(idx == 2) ? BUFSIZE2 \
+				:	(idx == 3) ? BUFSIZE3 \
+				:	(idx == 4) ? BUFSIZE4 \
+				:	(idx == 5) ? BUFSIZE5 \
+				:	(idx == 6) ? BUFSIZE6 \
+				:	(idx == 7) ? BUFSIZE7 \
+				:	(idx == 8) ? BUFSIZE8 \
+				: BUFSIZE8;
+
 
 typedef struct buffer_header
 {
@@ -86,10 +139,8 @@ kflHeader_t* kflPtr = NULL;
 /************Function Prototypes******************************************/
 
 int initKFL(kma_size_t);
-int roundup(kma_size_t);
 void cleanupKFL();
-kma_size_t convertIdxToSize(int);
-
+void allocSpaceLeft(int);
 /************External Declaration*****************************************/
 
 /**************Implementation***********************************************/
@@ -113,8 +164,8 @@ kma_malloc(kma_size_t size)
 		}
 	}
 
-	int index = roundup(size + sizeof(bufHeader_t));
-	kma_size_t reqSpace = convertIdxToSize(index);
+	int index = NDX(size + sizeof(bufHeader_t));
+	kma_size_t reqSpace = SPACE(index);
 
 	bufHeader_t* bufPtr;
 	bool reqNewPage;
@@ -135,6 +186,7 @@ kma_malloc(kma_size_t size)
 			}
 			else
 			{
+				allocSpaceLeft(index-1);
 				initKFL(size);
 				reqNewPage = TRUE;
 			}
@@ -156,7 +208,7 @@ kma_free(void* ptr, kma_size_t size)
 {
  	bufHeader_t* bufPtr;
 	p2flHeader_t* listPtr;
-	int index = roundup(size + sizeof(bufHeader_t));
+	int index = NDX(size + sizeof(bufHeader_t));
 
 	bufPtr = (bufHeader_t*)(ptr - sizeof(bufHeader_t));
 //	listPtr = (p2flHeader_t*) bufPtr->ptr;
@@ -168,6 +220,24 @@ kma_free(void* ptr, kma_size_t size)
 	cleanupKFL();
 }
 
+void
+allocSpaceLeft(int index)
+{
+	bufHeader_t* bufPtr;
+	kma_size_t reqSpace;
+	while(index >= 0)
+	{
+		reqSpace = SPACE(index);
+		while((kflPtr->freespaceSize - reqSpace) >= 0)
+		{	
+			bufPtr = (bufHeader_t*) kflPtr->freespacePtr;
+			bufPtr->ptr = (void*)&kflPtr->p2fl[index];
+			kflPtr->freespaceSize -= reqSpace;
+			kflPtr->freespacePtr += reqSpace;
+		}
+		index--;
+	}
+}
 void
 cleanupKFL()
 {
@@ -223,7 +293,7 @@ int initKFL(kma_size_t size)
 	int i;
 	for(i=0; i<MAXSET; ++i)
 	{
-		curKflPtr->p2fl[i].size = convertIdxToSize(i);
+		curKflPtr->p2fl[i].size = SPACE(i);
 		if(kflPtr == NULL)
 			curKflPtr->p2fl[i].buffer = NULL;
 		else
@@ -234,37 +304,4 @@ int initKFL(kma_size_t size)
 	return 0;
 }
 
-kma_size_t convertIdxToSize(int i)
-{
-/*	if(i == MAXSET-1)
-		return (kma_size_t) MAXSPACE;
-	else
-		return (kma_size_t) 1<<(i+4);
-*/
-	switch (i)
-	{
-		case 0:
-			return (kma_size_t) 1<<8;	
-		case 1:
-			return (kma_size_t) 1<<9;
-		case 2:
-			return (kma_size_t) 1<<11;
-		case 3:
-			return (kma_size_t) 1<<12;
-		case MAXSET-1:
-		default:
-			return (kma_size_t) MAXSPACE;
-	}
-}
-
-int roundup(kma_size_t size)
-{
-	int i;
-	for(i=0; i<MAXSET; ++i)
-	{
-		if(size < convertIdxToSize(i))
-			return i;
-	}
-	return MAXSET-1;
-}
 #endif // KMA_P2FL

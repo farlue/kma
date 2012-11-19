@@ -57,28 +57,43 @@
 
 #define FALSE 0
 #define TRUE 1
-#define MAXSET 5
-#define BUFSIZE0 1<<8
-#define BUFSIZE1 1<<9
-#define BUFSIZE2 1<<11
-#define BUFSIZE3 1<<12
-#define BUFSIZE4 MAXSPACE 
 #define MAXSPACE (PAGESIZE - sizeof(kpage_t*) - sizeof(mck2Header_t))
-#define NDX(size) \
-					(size > BUFSIZE2) \
-					? (size > BUFSIZE3) ? 4 : 3 \
-					: (size > BUFSIZE1) \
-						? 2	\
-						: (size > BUFSIZE0) ? 1 : 0;
-	
-#define SPACE(idx) \
-					(idx > 2) \
-					? (idx > 3) ? BUFSIZE4 : BUFSIZE3 \
-					: (idx > 1) \
-						? BUFSIZE2 \
-						: (idx > 0) ? BUFSIZE1: BUFSIZE0;
 #define PAGEOFFSET 0x1fff
 #define MASKOFFSET ~PAGEOFFSET
+
+#define NDX(size) \
+					(size < BUFSIZE0) ? 0 \
+				: (size < BUFSIZE1) ? 1 \
+				: (size < BUFSIZE2) ? 2 \
+				: (size < BUFSIZE3) ? 3 \
+				: (size < BUFSIZE4) ? 4 \
+				: (size < BUFSIZE5) ? 5 \
+				: (size < BUFSIZE6) ? 6 \
+				: (size < BUFSIZE7) ? 7 \
+				: 8;
+
+#define MAXSET 9
+#define BUFSIZE0 1<<5
+#define BUFSIZE1 1<<6
+#define BUFSIZE2 1<<7
+#define BUFSIZE3 1<<8
+#define BUFSIZE4 1<<9
+#define BUFSIZE5 1<<10
+#define BUFSIZE6 1<<11
+#define BUFSIZE7 1<<12
+#define BUFSIZE8 MAXSPACE 
+#define SPACE(idx) \
+					(idx == 0) ? BUFSIZE0 \
+				:	(idx == 1) ? BUFSIZE1 \
+				:	(idx == 2) ? BUFSIZE2 \
+				:	(idx == 3) ? BUFSIZE3 \
+				:	(idx == 4) ? BUFSIZE4 \
+				:	(idx == 5) ? BUFSIZE5 \
+				:	(idx == 6) ? BUFSIZE6 \
+				:	(idx == 7) ? BUFSIZE7 \
+				:	(idx == 8) ? BUFSIZE8 \
+				: BUFSIZE8
+
 
 typedef struct buf_header
 {
@@ -92,7 +107,6 @@ typedef struct mck2_header
 	struct mck2_header* prePagePtr;
 	struct mck2_header* nextPagePtr;
 	bufHeader_t* bufferPtr;
-//	struct mck2_header* pagelist[MAXSET];
 } mck2Header_t;
 
 /************Global Variables*********************************************/
@@ -101,10 +115,8 @@ mck2Header_t* mck2Ptr = NULL;
 
 /************Function Prototypes******************************************/
 
-mck2Header_t* searchPage(void*);
 mck2Header_t* searchFreelist(kma_size_t);
 int initMck2(kma_size_t);
-int roundup(kma_size_t);
 kma_size_t convertIdxToSize(int);
 void interpretRequest(kma_size_t, int*, kma_size_t*);
 
@@ -131,10 +143,8 @@ kma_malloc(kma_size_t size)
 		}
 	}
 
-	int index;
-	kma_size_t reqSpace;
-	index = NDX(size);
-	reqSpace = SPACE(index);
+	int index = NDX(size);
+	kma_size_t reqSpace = SPACE(index);
 //	interpretRequest(size, &index, &reqSpace);
 	bufHeader_t* bufPtr = NULL;
 
@@ -164,7 +174,8 @@ kma_malloc(kma_size_t size)
 void
 kma_free(void* ptr, kma_size_t size)
 {
-	mck2Header_t* tempMck2Ptr = searchPage(ptr);
+	mck2Header_t* tempMck2Ptr = (mck2Header_t*)(((unsigned long)ptr&MASKOFFSET) + sizeof(kpage_t*));
+
 	if(tempMck2Ptr == NULL)
 	{
 		printf("ERROR: cannot find the return address!\n");
@@ -173,6 +184,7 @@ kma_free(void* ptr, kma_size_t size)
 	{
 		int index = NDX(size);
 		kma_size_t reqSpace = SPACE(index);
+//		interpretRequest(size, &index, &reqSpace);
 		bufHeader_t* bufPtr = (bufHeader_t*)ptr;
 		bufPtr->ptr = tempMck2Ptr->bufferPtr;
 		tempMck2Ptr->bufferPtr = bufPtr;
@@ -210,23 +222,6 @@ kma_free(void* ptr, kma_size_t size)
 	}
 }
 
-mck2Header_t* searchPage(void* ptr)
-{
-	mck2Header_t* curMck2Ptr = mck2Ptr;
-	unsigned long baseAddr;
-	unsigned long bufAddr = (unsigned long)ptr;
-	while(curMck2Ptr != NULL)
-	{
-		baseAddr = (unsigned long)curMck2Ptr;
-		if((baseAddr>>13) == (bufAddr>>13))
-		{
-			return curMck2Ptr;
-		}
-		curMck2Ptr = curMck2Ptr->prePagePtr;
-	}
-	return NULL;
-}
-
 mck2Header_t* searchFreelist(kma_size_t reqSpace)
 {
 	mck2Header_t* curMck2Ptr = mck2Ptr;
@@ -243,12 +238,9 @@ mck2Header_t* searchFreelist(kma_size_t reqSpace)
 
 int initMck2(kma_size_t size)
 {
-	int index;
-	kma_size_t reqSpace;
-	index = NDX(size);
-	reqSpace = SPACE(index);
+	int index = NDX(size);
+	kma_size_t reqSpace = SPACE(index);
 //	interpretRequest(size, &index, &reqSpace);
-
 
 	kpage_t* page;
 	page = get_page();
@@ -287,22 +279,6 @@ int initMck2(kma_size_t size)
 		tempBufPtr = (bufHeader_t*)((void*)tempBufPtr + reqSpace);
 		totalSpace += reqSpace;
 	}
-	
-/*
-	while (index >= 0)
-	{
-//		reqSpace = convertIdxToSize(index);
-		reqSpace = SPACE(index);
-		while (totalSpace+reqSpace <= MAXSPACE)
-		{
-			tempBufPtr->ptr = curMck2Ptr->freelistArr[index].ptr;
-			curMck2Ptr->freelistArr[index].ptr = tempBufPtr;
-			tempBufPtr = (bufHeader_t*)((void*)tempBufPtr + reqSpace);
-			totalSpace += reqSpace;
-		}
-		index--;
-	}
-*/
 	mck2Ptr = curMck2Ptr;
 	return 0;
 }
@@ -320,48 +296,33 @@ kma_size_t convertIdxToSize(int index)
 		case 3:
 			return (kma_size_t) BUFSIZE3;
 		case 4:
-		default:
 			return (kma_size_t) BUFSIZE4;
+		case 5:
+			return (kma_size_t) BUFSIZE5;	
+		case 6:
+			return (kma_size_t) BUFSIZE6;	
+		case 7:
+			return (kma_size_t) BUFSIZE7;	
+		case 8:
+		default:
+			return (kma_size_t) BUFSIZE8;
 	}
-}
-
-int roundup(kma_size_t size)
-{
-	return (size > BUFSIZE2) \
-					? (size > BUFSIZE3) ? 4 : 3 \
-					: (size > BUFSIZE1) \
-						? 2	\
-						: (size > BUFSIZE0) ? 1 : 0;	
 }
 
 void interpretRequest(kma_size_t size, int* idxPtr, kma_size_t* reqSpacePtr)
 {
-/*	*idxPtr = (size > BUFSIZE2) \
-					? (size > BUFSIZE3) ? 4 : 3 \
-					: (size > BUFSIZE1) \
-						? 2	\
-						: (size > BUFSIZE0) ? 1 : 0;	
-*/
-	*idxPtr = NDX(size);
-
-	switch(*idxPtr)
+	int i;
+	kma_size_t space;
+	for(i = 0; i < MAXSET; ++i)
 	{
-		case 0:
-			*reqSpacePtr = (kma_size_t) BUFSIZE0;
-			break;
-		case 1:
-			*reqSpacePtr = (kma_size_t) BUFSIZE1;
-			break;
-		case 2:
-			*reqSpacePtr = (kma_size_t) BUFSIZE2;
-			break;
-		case 3:
-			*reqSpacePtr = (kma_size_t) BUFSIZE3;
-			break;
-		case 4:
-		default:
-			*reqSpacePtr = (kma_size_t) BUFSIZE4;
-			break;
+		space = SPACE(i);
+		if(size <= space)
+		{
+			*idxPtr = i;
+			*reqSpacePtr = space;
+			return;
+		}
 	}
+	printf("ERROR: cannot round up the request!\n");
 }
 #endif // KMA_MCK2
