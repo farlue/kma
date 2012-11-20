@@ -107,8 +107,6 @@ typedef struct mck2_header
 	struct mck2_header* prev;
 	struct mck2_header* next;
 	bufHeader_t* bufferPtr;
-	struct mck2_header* freelist[MAXSET];
-	struct mck2_header* ptr;
 } mck2Header_t;
 
 /************Global Variables*********************************************/
