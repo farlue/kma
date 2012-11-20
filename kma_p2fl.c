@@ -117,19 +117,13 @@ typedef struct buffer_header
 	void* ptr;
 } bufHeader_t;
 
-typedef struct p2fl_header
-{
-	kma_size_t size;
-	bufHeader_t* buffer;
-} p2flHeader_t;
-
 typedef struct k_freelist
 {
 	int pagesUsed;
 	int spaceUsed;
 	kma_size_t freespaceSize;
 	void* freespacePtr;
-	p2flHeader_t p2fl[MAXSET];
+	bufHeader_t* p2fl[MAXSET];
 } kflHeader_t;
 
 /************Global Variables*********************************************/
@@ -173,15 +167,15 @@ kma_malloc(kma_size_t size)
 
 	do {
 		reqNewPage = FALSE;
-		if(kflPtr->p2fl[index].buffer == NULL)
+		if(kflPtr->p2fl[index] == NULL)
 		{
 			if((reqSpace <= kflPtr->freespaceSize))
 			{
 				bufPtr = (bufHeader_t*) kflPtr->freespacePtr;
-				bufPtr->ptr =(void*)&kflPtr->p2fl[index];
+//				bufPtr->ptr = kflPtr->p2fl[index];
 				kflPtr->freespaceSize -= reqSpace;
 				kflPtr->freespacePtr += reqSpace;
-				kflPtr->spaceUsed += (int)reqSpace;
+				kflPtr->spaceUsed += reqSpace;
 				return (void*)bufPtr + sizeof(bufHeader_t);
 			}
 			else
@@ -193,9 +187,9 @@ kma_malloc(kma_size_t size)
 		}
 		else
 		{
-			bufPtr = kflPtr->p2fl[index].buffer;
-			kflPtr->p2fl[index].buffer = (bufHeader_t*)bufPtr->ptr;
-			bufPtr->ptr = (void*)&kflPtr->p2fl[index];
+			bufPtr = kflPtr->p2fl[index];
+			kflPtr->p2fl[index] = (bufHeader_t*)bufPtr->ptr;
+//			bufPtr->ptr = (void*)&kflPtr->p2fl[index];
 			kflPtr->spaceUsed += (int)reqSpace;
 			return (void*)bufPtr + sizeof(bufHeader_t);
 		}
@@ -207,16 +201,13 @@ void
 kma_free(void* ptr, kma_size_t size)
 {
  	bufHeader_t* bufPtr;
-	p2flHeader_t* listPtr;
 	int index = NDX(size + sizeof(bufHeader_t));
+	kma_size_t reqSpace = SPACE(index);
 
 	bufPtr = (bufHeader_t*)(ptr - sizeof(bufHeader_t));
-//	listPtr = (p2flHeader_t*) bufPtr->ptr;
-	listPtr = &kflPtr->p2fl[index];
-	bufPtr->ptr = (void*) listPtr->buffer;
-	listPtr->buffer = bufPtr;
-//	printf("free size: %d\tlist size: %d\n", size, listPtr->size);
-	kflPtr->spaceUsed -= (int)listPtr->size;
+	bufPtr->ptr = kflPtr->p2fl[index];
+	kflPtr->p2fl[index] = bufPtr;
+	kflPtr->spaceUsed -= reqSpace;
 	cleanupKFL();
 }
 
@@ -293,11 +284,10 @@ int initKFL(kma_size_t size)
 	int i;
 	for(i=0; i<MAXSET; ++i)
 	{
-		curKflPtr->p2fl[i].size = SPACE(i);
 		if(kflPtr == NULL)
-			curKflPtr->p2fl[i].buffer = NULL;
+			curKflPtr->p2fl[i] = NULL;
 		else
-			curKflPtr->p2fl[i].buffer = preKflPtr->p2fl[i].buffer;
+			curKflPtr->p2fl[i] = preKflPtr->p2fl[i];
 	}
 	kflPtr = curKflPtr;	
 //	printf("how many pages are spaceUsed?\t%d\n", curKflPtr->id+1);
