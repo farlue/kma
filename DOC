@@ -1,0 +1,12 @@
+
+Basic buddy:
+
+  1. We found that the time cost of updating the bitmap is crucial to the total performance, so we specifically optimized this function, using pre-set masks and memset().
+  2. To minimize the number of pages that are occupied simultaneously, and thus increase space efficiency, pages are freed once they are empty.
+  3. The free lists are doubly linked lists, which enables fast insertion and removal.
+  4. To round up a requested malloc size fast, our get_roundup() function uses mostly bit operation.
+
+Lazy buddy:
+
+  1. Lazy buddy is faster than basic buddy, since it updates bitmap less frequently and coalesces only when necessary.
+  2. Lazy buddy puts delayed buffers in the front of free lists, therefore a delayed buddy buffer can be found quickly for accelerated coalescing.

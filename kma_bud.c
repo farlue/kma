@@ -41,8 +41,9 @@
 /************System include***********************************************/
 #include <assert.h>
 #include <stdlib.h>
-#include <string.h>
 #include <stdio.h>
+#include <math.h>
+#include <string.h>
 
 /************Private include**********************************************/
 #include "kpage.h"
@@ -56,356 +57,425 @@
  */
 
 #define MINBUFSIZE 32
-#define LOGMINBUFSIZE 5
-#define BITMAPSIZE (PAGESIZE / MINBUFSIZE / 8)
-#define BUFCOUNT 8
+#define MAXBUFCLASS (int)log2(PAGESIZE / MINBUFSIZE)
+#define FIRSTPAGEHEADERSIZE (sizeof(pageHeader_t) + sizeof(buddyFreeLists_t))
+#define PAGEHEADERSIZE (sizeof(pageHeader_t))
 
-#define PAGEOFFSET(x) ((int)(((long)(x)) &(PAGESIZE-1)) >> LOGMINBUFSIZE)
-#define INDEX2SIZE(i) (1 << ((i) + LOGMINBUFSIZE))
-#define BUDDYALLOCINFO ((struct buddyAlloc *)(gRootPage->ptr))
+#define BITSPERCHAR 8
+#define MAXBITMAPSEGS ((PAGESIZE / MINBUFSIZE) / BITSPERCHAR)
+#define FREE 0
+#define USED 1
 
-struct bufHeader
-{
-  struct bufHeader * prev;
-  struct bufHeader * next;
+struct bufferHeader;
+typedef struct bufferHeader {
+  struct bufferHeader* nextBuffer;
+  struct bufferHeader* prevBuffer;
+  void* pagePtr;
   kma_size_t size;
-};
+} bufferHeader_t;
 
-struct pageInfo
-{
-  unsigned char bitmap[BITMAPSIZE];
-  int block_count;
-  kpage_t *page;
-};
+typedef struct {
+  kma_size_t size;
+  bufferHeader_t* ptr;
+} freeListHeader_t;
 
-struct freeList
-{
-  struct bufHeader * head;
-  int active;
-  int local_free;
-  int global_free;
-};
+typedef struct {
+  unsigned char bitSegments[MAXBITMAPSEGS];
+} bitMap_t;
 
-struct buddyAlloc
-{
-  struct freeList free_lists[BUFCOUNT];
-  unsigned char or_mask[3][8];
-  unsigned char and_mask[3][8];
-  long total_size;
-};
+typedef struct {
+  kpage_t* page;
+  bitMap_t bitMap;
+  int spaceUsed;
+  int pageNo;
+} pageHeader_t;
+
+typedef struct {
+  freeListHeader_t fl[MAXBUFCLASS];
+  unsigned char hasFl;
+  int pagesUsed;
+  void* firstPagePtr;
+} buddyFreeLists_t;
 
 /************Global Variables*********************************************/
-static kpage_t * gRootPage = NULL;
-
+static buddyFreeLists_t* budfls;;
 
 /************Function Prototypes******************************************/
-/* intializing and freeing global data used by buddy allocator */
-void init_buddy_alloc();
-void exit_buddy_alloc();
-
-/* get_page() and split page into free buffers */
-void init_new_page();
-
-/* create a buffer */
-void init_buffer(void * ptr, struct bufHeader * prev, struct bufHeader * next);
-
-/* translate size to index */
-kma_size_t size2index(kma_size_t size);
-
-/* push and pop buffer from/to the the free list*/
-void* pop_buf(kma_size_t index);
-void push_buf(kma_size_t index, void * ptr);
-
-
-void coalesce_buf(kma_size_t index, void * ptr);
-/* show status (free/in use) of a block */
-inline int block_status(void *ptr);
-
-/* update bitmap */
-void update_pageinfo(kma_size_t index, void * ptr, int op);
-inline void * find_buddy(kma_size_t index, void * ptr);
-
-
-/* helper function for debug use*/
-void print_free_list(kma_size_t index);
-void print_bitmap(void * ptr);
+bool
+init(kma_size_t size);
+void
+header_alloc(void* pagePtr, kma_size_t headerSize);
+void*
+big_size_alloc(kma_size_t reqSize);
+void*
+buddy_alloc(kma_size_t reqSize);
+freeListHeader_t*
+coalesce(void* pagePtr, void* bufPtr, kma_size_t bufSize);
+int
+get_buf_class(kma_size_t bufSize);
+void
+get_buffer_from_large_buffer(void* pagePtr, kma_size_t reqBufSize,
+			     kma_size_t largeBufSize, kma_size_t largeBufStartAddr);
+void
+add_buffer_to_free_list(void* pagePtr, int bufClass,
+			kma_size_t startAddr, kma_size_t bufSize);
+void
+remove_buffer_from_free_list(bufferHeader_t* bufHdrPtr, int bufClass);
+void
+update_bitmap(void* pagePtr, void* bufPtr, kma_size_t bufSize, bool status);
+int
+lookup_bitmap(void* pagePtr, kma_size_t bufStartAddr, kma_size_t bufSize);
+kma_size_t
+get_roundup(kma_size_t reqSize);
+	
 /************External Declaration*****************************************/
 
 /**************Implementation***********************************************/
-void init_buddy_alloc()
-{
-  gRootPage = get_page();
-  struct buddyAlloc * buddyInfo = (struct buddyAlloc *) gRootPage->ptr;
-
-  unsigned char or_mask[3][8] = {
-    {0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80},
-    {0x03, 0x00, 0x0c, 0x00, 0x30, 0x00, 0xc0, 0x00},
-    {0x0f, 0x00, 0x00, 0x00, 0xf0, 0x00, 0x00, 0x00},
-  };
-  unsigned char and_mask[3][8] = {
-    {0xfe, 0xfd, 0xfb, 0xf7, 0xef, 0xdf, 0xbf, 0x7f},
-    {0xfc, 0xff, 0xf3, 0xff, 0xcf, 0xff, 0x3f, 0xff},
-    {0xf0, 0xff, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xff},
-  };
-
-  memset(buddyInfo->free_lists, 0, BUFCOUNT * sizeof(struct freeList));
-  memcpy(buddyInfo->or_mask, or_mask, 24);
-  memcpy(buddyInfo->and_mask, and_mask, 24);
-  buddyInfo->total_size = 0;
-}
-
-void release_buffer(void * buf)
-{
-  struct bufHeader * bufh = (struct bufHeader *) buf;
-  int index = size2index(bufh->size);
-  struct bufHeader * prev = bufh->prev;
-  struct bufHeader * next = bufh->next;
-  if (prev == NULL)
-    BUDDYALLOCINFO->free_lists[index].head = next;
-  else
-    prev->next = next;
-  if (next != NULL)
-    next->prev = prev;
-  update_pageinfo(index, buf, 1);
-}
-
-void clean_page(void * ptr)
-{
-  void * buf = ptr + (MINBUFSIZE << 1);
-  while(buf < ptr + PAGESIZE)
-    {
-      release_buffer(buf);
-      buf += ((struct bufHeader *)buf)->size;
-    }
-  struct pageInfo * page_info = (struct pageInfo *) ptr;
-  free_page(page_info->page);
-}
-
-void
-update_pageinfo(kma_size_t index, void * ptr, int op)
-{
-  // update bitmap
-  struct pageInfo * page_info = BASEADDR(ptr);
-  int offset = PAGEOFFSET(ptr);
-
-  if (op == 1)
-    {
-      if (index < 3)
-        {
-          page_info->bitmap[offset >> 3]
-            |= BUDDYALLOCINFO->or_mask[index][offset & 7];
-        }
-      else
-        memset(page_info->bitmap + (offset >> 3), 0xff, 1 << (index - 3));
-      page_info->block_count += 1 << index;
-    }
-  else
-    {
-      if (index < 3)
-        {
-          page_info->bitmap[offset >> 3]
-            &= BUDDYALLOCINFO->and_mask[index][offset & 7];
-        }
-      else
-        memset(page_info->bitmap + (offset >> 3), 0, 1 << (index - 3));
-      page_info->block_count -= 1 << index;
-    }
-}
-
-void
-print_free_list(kma_size_t index)
-{
-  struct bufHeader * ret = BUDDYALLOCINFO->free_lists[index].head;
-  printf(">>> %d <<<\n", index);
-  while(ret != NULL)
-    {
-      printf("a %lx\n", (unsigned long) ret);
-      ret = ret->next;
-    }
-}
-
-void
-print_bitmap(void * ptr)
-{
-  struct pageInfo * page_info = BASEADDR(ptr);
-  int i;
-  for (i = 0; i < BITMAPSIZE; i ++)
-    printf("%02x", page_info->bitmap[i]);
-  printf("\n");
-}
-
-kma_size_t
-size2index(kma_size_t size)
-{
-  kma_size_t index = 0;
-  while (INDEX2SIZE(index) < size)
-    ++index;
-  return index;
-}
-
-void
-init_buffer(void * ptr, struct bufHeader * prev, struct bufHeader * next)
-{
-  struct bufHeader * bptr = (struct bufHeader *) ptr;
-  bptr->next = next;
-  bptr->prev = prev;
-}
-
-void
-push_buf(kma_size_t index, void * ptr)
-{
-  if (BUDDYALLOCINFO->free_lists[index].head == NULL)
-    {
-      init_buffer(ptr, NULL, NULL);
-    }
-  else
-    {
-      BUDDYALLOCINFO->free_lists[index].head->prev = ptr;
-      init_buffer(ptr, NULL, BUDDYALLOCINFO->free_lists[index].head);
-    }
-  BUDDYALLOCINFO->free_lists[index].head = ptr;
-  BUDDYALLOCINFO->free_lists[index].head->size = MINBUFSIZE << index;
-
-  update_pageinfo(index, ptr, 0);
-  assert(block_status(ptr) == 0);
-}
-
-void
-init_new_page()
-{
-  kpage_t * page = get_page();
-  void * ptr = page->ptr;
-  kma_size_t index;
-  kma_size_t size = MINBUFSIZE << 1;  /* page info takes 64 bytes*/
-
-  struct pageInfo * page_info = (struct pageInfo*) ptr;
-  memset(ptr, 0, sizeof(struct pageInfo));
-
-  ptr += size;
-  for (index = 1; index < BUFCOUNT; index++)
-    {
-      push_buf(index, ptr);
-      ptr += size;
-      size <<= 1;
-    }
-  page_info->block_count = 0;
-  page_info->page = page;
-}
-
-void*
-pop_buf(kma_size_t index)
-{
-
-  struct bufHeader * ptr = (void *)BUDDYALLOCINFO->free_lists[index].head;
-  if (ptr->next != NULL)
-    ptr->next->prev = NULL;
-  BUDDYALLOCINFO->free_lists[index].head = ptr->next;
-
-  update_pageinfo(index, ptr, 1);
-  assert(block_status(ptr) != 0);
-  return (void*) ptr;
-}
-
-void *
-split_buf(kma_size_t index_from, kma_size_t index_to)
-{
-  void * ptr = pop_buf(index_from);
-  while (index_from > index_to)
-    {
-      --index_from;
-      push_buf(index_from, ptr + INDEX2SIZE(index_from));
-    }
-  return ptr;
-}
-
-int
-block_status(void *ptr)
-{
-  struct pageInfo * page_info = BASEADDR(ptr);
-  int offset = PAGEOFFSET(ptr);
-  return page_info->bitmap[offset >> 3] & (1 << (offset & 7));
-}
-
-void *
-find_buddy(kma_size_t index, void * ptr)
-{
-  void * xor = (void*)(long)(INDEX2SIZE(index));
-  return (void*)((unsigned long)ptr ^ (unsigned long)xor);
-}
-
-void
-coalesce_buf(kma_size_t index, void * ptr)
-{
-  void * buddy = find_buddy(index, ptr);
-  while (buddy != BASEADDR(ptr) && block_status(buddy) == 0
-         && ((struct bufHeader*)buddy)->size == ((struct bufHeader*)ptr)->size)
-    {
-      release_buffer(ptr);
-      release_buffer(buddy);
-      if (buddy < ptr)
-        ptr = buddy;
-      ++index;
-      push_buf(index, ptr);
-
-      if (index == BUFCOUNT)
-        break;
-      buddy = find_buddy(index, ptr);
-    }
-}
 
 void*
 kma_malloc(kma_size_t size)
 {
-  if (gRootPage == NULL)
-    init_buddy_alloc();
-  if (size > PAGESIZE - sizeof(void*))
-    return NULL;
-  if (size > PAGESIZE / 2)
-    {
-      kpage_t * page;
-      page = get_page();
-      *((kpage_t **)(page->ptr)) = page;
-      return page->ptr + sizeof(kpage_t *);
-    }
-  BUDDYALLOCINFO->total_size += size;
-  kma_size_t index = size2index(size);
-  kma_size_t i;
+  /*printf("requested malloc size: %d\n", size);*/
 
-  for (i = index; i < BUFCOUNT; i++) {
-    if (BUDDYALLOCINFO->free_lists[i].head != NULL)
-      return split_buf(i, index);
+  if (size > PAGESIZE) {
+    error("requested size is larger than PAGESIZE.", "");
+    return NULL;
   }
 
-  init_new_page();
-  return pop_buf(index);
+  if (budfls == NULL) {
+    if (!init(size)) {
+      return NULL;
+    }
+  }
+
+  if (PAGESIZE / 2 < size) { // the requested size needs a new page
+    return big_size_alloc(size);
+  } else { // the requested size might fit in a free buffer
+    return buddy_alloc(size);
+  }
+
+  return NULL;
+}
+
+void 
+kma_free(void* ptr, kma_size_t size)
+{
+  /*  printf("requested free size: %d\n", size);
+  if (size == 299) {
+    printf("freeing #84: 266");
+    }*/
+
+  void* pagePtr = ptr - ((long)ptr % PAGESIZE);
+
+  if (size > PAGESIZE / 2) {
+    kpage_t* page;
+    page = *((kpage_t**)(pagePtr));
+    budfls->pagesUsed--;
+
+    void* firstPagePtr = budfls->firstPagePtr;
+    kma_size_t firstPageSpaceUsed = ((pageHeader_t*)(budfls->firstPagePtr))->spaceUsed;
+    short pagesUsed = budfls->pagesUsed;
+
+    //printf("freeing page %lx\n", (unsigned long)(pagePtr));
+    free_page(page);
+
+    if (pagePtr != firstPagePtr) {
+      if (firstPageSpaceUsed == 0 &&
+	  pagesUsed == 1) {
+	printf("freeing first page %lx\n", (unsigned long)firstPagePtr);
+	free_page(((pageHeader_t*)firstPagePtr)->page);
+	budfls = NULL;
+      }
+    } else {
+      budfls = NULL;
+    }
+
+
+    return;
+  }
+
+  kma_size_t bufSize = get_roundup(size);
+  //int bufClass = get_buf_class(bufSize);
+  //kma_size_t bufStartAddr = ptr - pagePtr;
+
+  update_bitmap(pagePtr, ptr, bufSize, FREE);
+  ((pageHeader_t*)pagePtr)->spaceUsed -= bufSize;
+
+  if (((pageHeader_t*)pagePtr)->spaceUsed == 0) {
+    kma_size_t sizeFreed;
+    if (((pageHeader_t*)pagePtr)->pageNo == 0) {
+      if (budfls->pagesUsed > 1) {
+	coalesce(pagePtr, ptr, bufSize);
+	return;
+      } else {
+	sizeFreed = get_roundup(FIRSTPAGEHEADERSIZE);
+      }
+    } else {
+      sizeFreed = get_roundup(PAGEHEADERSIZE);
+    }
+
+    bufferHeader_t* bufPtr = pagePtr + sizeFreed;
+
+    while (sizeFreed < PAGESIZE) {
+      if ((void*)bufPtr != ptr) {
+	sizeFreed += bufPtr->size;
+	remove_buffer_from_free_list(bufPtr, get_buf_class(bufPtr->size));
+	bufPtr = (void*)bufPtr + bufPtr->size;
+      } else {
+	sizeFreed += bufSize;
+	bufPtr = (void*)bufPtr + bufSize;
+      }
+    }
+    budfls->pagesUsed--;
+    void* firstPagePtr = budfls->firstPagePtr;
+    free_page(*((kpage_t**)pagePtr));
+
+    if (pagePtr != firstPagePtr) {
+      if (((pageHeader_t*)(budfls->firstPagePtr))->spaceUsed == 0 &&
+	  budfls->pagesUsed == 1) {
+	free_page(((pageHeader_t*)(budfls->firstPagePtr))->page);
+	budfls = NULL;
+      }
+    } else {
+      budfls = NULL;
+    }
+
+    return;
+  }
+
+  //add_buffer_to_free_list(pagePtr, get_buf_class(size), (int)(ptr - pagePtr), bufSize);
+
+  coalesce(pagePtr, ptr, bufSize);
+
+}
+
+bool
+init(kma_size_t size)
+{
+  kpage_t* page = get_page();
+  *((kpage_t**)page->ptr) = page;
+
+  ((pageHeader_t*)page->ptr)->pageNo = 0;
+
+  if (page->size < size + PAGEHEADERSIZE) { // the requested size cannot fit in any page
+    free_page(page);
+    error("init: page size too small for requested size.", "");
+    return FALSE;
+  }
+
+  budfls = page->ptr + PAGEHEADERSIZE;
+  budfls->hasFl = 0x00;
+  budfls->pagesUsed = 1;
+  budfls->firstPagePtr = page->ptr;
+  int i, bufSize = PAGESIZE / 2;
+  for (i = 0; i < MAXBUFCLASS; i++) {
+    (budfls->fl[i]).size = bufSize;
+    (budfls->fl[i]).ptr = NULL;
+    bufSize /= 2;
+  }
+
+  header_alloc(page->ptr, FIRSTPAGEHEADERSIZE);
+
+  return TRUE;
 }
 
 void
-kma_free(void* ptr, kma_size_t size)
+header_alloc(void* pagePtr, kma_size_t headerSize)
 {
-  if (size > PAGESIZE - sizeof(void*))
-    return;
-  if (size > PAGESIZE / 2)
-    {
-      kpage_t * page = *(kpage_t**)(BASEADDR(ptr));
-      free_page(page);
-      return;
-    }
-
-  kma_size_t index = size2index(size);
-  push_buf(index, ptr);
-  coalesce_buf(index, ptr);
-  struct pageInfo * page_info = BASEADDR(ptr);
-  if (page_info->block_count == 0)
-    clean_page(page_info);
-
-  BUDDYALLOCINFO->total_size -= size;
-  if(BUDDYALLOCINFO->total_size == 0)
-    {
-      free_page(gRootPage);
-      gRootPage = NULL;
-    }
-  return;
+  get_buffer_from_large_buffer(pagePtr, headerSize, PAGESIZE, 0);
+  //update bitmap
+  memset(pagePtr + sizeof(kpage_t*), '\000', MAXBITMAPSEGS);
+  ((pageHeader_t*)pagePtr)->spaceUsed = 0;
 }
 
+void*
+big_size_alloc(kma_size_t reqSize)
+{
+  kpage_t* page = get_page();
+  *((kpage_t**)page->ptr) = page;
+  budfls->pagesUsed++;
+
+  return page->ptr + sizeof(kpage_t*) + sizeof(bitMap_t);
+}
+
+void*
+buddy_alloc(kma_size_t reqSize)
+{
+  kma_size_t reqBufSize = get_roundup(reqSize);
+  int reqBufClass = get_buf_class(reqBufSize);
+  int bufClass = reqBufClass;
+  void* bufPtr;
+  while ((int)(budfls->hasFl & (1 << bufClass)) == 0 && bufClass >= 0) {
+    bufClass--;
+  }
+  if (bufClass == reqBufClass) {
+    bufPtr = (budfls->fl[bufClass]).ptr;
+    remove_buffer_from_free_list((budfls->fl[bufClass]).ptr, bufClass);
+    update_bitmap(((bufferHeader_t*)bufPtr)->pagePtr, bufPtr, reqBufSize, USED);
+  } else {
+    if (bufClass < 0) {
+      kpage_t* page = get_page();
+      *((kpage_t**)page->ptr) = page;
+      ((pageHeader_t*)page->ptr)->pageNo = 1;
+      budfls->pagesUsed++;
+      header_alloc(page->ptr, PAGEHEADERSIZE);
+      return buddy_alloc(reqSize);
+    } else {
+      bufPtr = (budfls->fl[bufClass]).ptr;
+      remove_buffer_from_free_list((budfls->fl[bufClass]).ptr, bufClass);
+      get_buffer_from_large_buffer(((bufferHeader_t*)bufPtr)->pagePtr, reqBufSize,
+				   (budfls->fl[bufClass]).size,
+				   (kma_size_t)(bufPtr - ((bufferHeader_t*)bufPtr)->pagePtr));
+      update_bitmap(((bufferHeader_t*)bufPtr)->pagePtr, bufPtr, reqBufSize, USED);
+    }
+  }
+  ((pageHeader_t*)(((bufferHeader_t*)bufPtr)->pagePtr))->spaceUsed += reqBufSize;  
+  return bufPtr;
+}
+
+freeListHeader_t*
+coalesce(void* pagePtr, void* bufPtr, kma_size_t bufSize)
+{
+  int bufClass = get_buf_class(bufSize);
+  kma_size_t bufStartAddr = bufPtr - pagePtr;
+  void* buddyPtr = bufStartAddr % (bufSize * 2) == bufSize ?
+    bufPtr - bufSize : bufPtr + bufSize;
+  kma_size_t buddyStartAddr = buddyPtr - pagePtr;
+  int buddyUsed = lookup_bitmap(pagePtr, buddyStartAddr, bufSize);
+
+  if (buddyPtr == pagePtr) {
+    add_buffer_to_free_list(pagePtr, bufClass, bufStartAddr, bufSize);
+    return &(budfls->fl[bufClass]);
+  }
+  if (buddyUsed == 0 && ((bufferHeader_t*)buddyPtr)->size == bufSize) {
+    remove_buffer_from_free_list((bufferHeader_t*)buddyPtr, bufClass);
+    void* bigBufPtr = bufPtr < buddyPtr ? bufPtr : buddyPtr;
+    return coalesce(pagePtr, bigBufPtr, bufSize * 2);
+  } else {
+    add_buffer_to_free_list(pagePtr, bufClass, bufStartAddr, bufSize);
+    return &(budfls->fl[bufClass]);
+  }
+}
+
+int
+get_buf_class(kma_size_t bufSize)
+{
+  return (int)log2(PAGESIZE / bufSize) - 1;
+}
+
+void
+get_buffer_from_large_buffer(void* pagePtr, kma_size_t reqBufSize,
+			     kma_size_t largeBufSize, kma_size_t largeBufStartAddr)
+{
+  kma_size_t bufSize = largeBufSize / 2;
+  int bufClass = get_buf_class(bufSize); // get the class of the buffer
+  kma_size_t freeBufStartAddr;
+  while (bufSize >= MINBUFSIZE) {
+    freeBufStartAddr = largeBufStartAddr + bufSize;
+    add_buffer_to_free_list(pagePtr, bufClass, freeBufStartAddr, bufSize);
+    if (bufSize / 2 < reqBufSize) { // found the right buffer size for header
+      return;
+    } else {
+      bufSize /= 2;
+      bufClass ++;
+    }
+  }
+}
+
+void
+add_buffer_to_free_list(void* pagePtr, int bufClass,
+			kma_size_t bufStartAddr, kma_size_t bufSize)
+{
+  bufferHeader_t* flhead = (budfls->fl[bufClass]).ptr; // put the buddy into a free list
+  bufferHeader_t* bufHdrPtr = (bufferHeader_t*)(pagePtr + bufStartAddr);
+  bufHdrPtr->nextBuffer = flhead;
+  bufHdrPtr->prevBuffer = NULL;
+  bufHdrPtr->pagePtr = pagePtr;
+  bufHdrPtr->size = bufSize;
+  if (flhead != NULL) {
+    flhead->prevBuffer = bufHdrPtr;
+  }
+  (budfls->fl[bufClass]).ptr = bufHdrPtr;
+  budfls->hasFl |= 1 << bufClass;
+}
+
+void
+remove_buffer_from_free_list(bufferHeader_t* bufHdrPtr, int bufClass)
+{
+  // get a buffer from a free list
+  bufferHeader_t* prevBufHdrPtr = bufHdrPtr->prevBuffer;
+  bufferHeader_t* nextBufHdrPtr = bufHdrPtr->nextBuffer;
+  if (prevBufHdrPtr != NULL) {
+    prevBufHdrPtr->nextBuffer = bufHdrPtr->nextBuffer;
+  }
+  if (nextBufHdrPtr != NULL) {
+    nextBufHdrPtr->prevBuffer = bufHdrPtr->prevBuffer;
+  }
+  if (bufHdrPtr == (budfls->fl[bufClass]).ptr) {
+    (budfls->fl[bufClass]).ptr = nextBufHdrPtr;
+    if (nextBufHdrPtr == NULL) {
+      budfls->hasFl &= 0xff - (1 << bufClass);
+    }
+  }
+}
+
+void
+update_bitmap(void* pagePtr, void* bufPtr, kma_size_t bufSize, bool status)
+{
+  int totalBits = bufSize / MINBUFSIZE;
+  int i;
+  unsigned char mask = 0xff;
+  bitMap_t* bitMapLoc = pagePtr + sizeof(kpage_t*);
+  kma_size_t bufStartAddr = (long)bufPtr - (long)pagePtr;
+  int segNo = (bufStartAddr / MINBUFSIZE) / BITSPERCHAR;
+  int bitNo = (bufStartAddr / MINBUFSIZE) % BITSPERCHAR;
+  if (totalBits < BITSPERCHAR) {
+    for (i = bitNo; i < bitNo + totalBits; i++) {
+      mask -= 1 << i;
+    }
+    if (status == FREE) {
+      bitMapLoc->bitSegments[segNo] &= mask;
+    } else {
+      bitMapLoc->bitSegments[segNo] |= ~mask;
+    }
+    return;
+  }
+
+  if (status == FREE) {
+    memset((void*)bitMapLoc + segNo, '\000', totalBits / BITSPERCHAR);
+  } else {
+    memset((void*)bitMapLoc + segNo, '\377', totalBits / BITSPERCHAR);
+  }
+
+  /*  printf("page %lx bitMap after size %d: ", (unsigned long)pagePtr, bufSize);
+  for (i = 0; i < MAXBITMAPSEGS; i++) {
+    printf("%x ", (unsigned int)bitMapLoc->bitSegments[i]);
+  }
+  printf(" -- %ld; %d\n", sizeof(bitMap_t), i);
+  printf(" ");*/
+}
+
+int
+lookup_bitmap(void* pagePtr, kma_size_t bufStartAddr, kma_size_t bufSize)
+{
+  bitMap_t* bitMapLoc = pagePtr + sizeof(kpage_t*);
+  int segNo = (bufStartAddr / MINBUFSIZE) / BITSPERCHAR;
+  int bitNo = (bufStartAddr / MINBUFSIZE) % BITSPERCHAR;
+  return (int)(bitMapLoc->bitSegments[segNo] & (1 << bitNo));
+}
+
+kma_size_t
+get_roundup(kma_size_t reqSize)
+{
+  if (reqSize < MINBUFSIZE) {
+    return MINBUFSIZE;
+  }
+  kma_size_t bufSize = reqSize;
+  bufSize--;
+  bufSize |= bufSize >> 1;
+  bufSize |= bufSize >> 2;
+  bufSize |= bufSize >> 4;
+  bufSize |= bufSize >> 8;
+  return bufSize + 1;
+}
 #endif // KMA_BUD
