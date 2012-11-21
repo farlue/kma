@@ -94,30 +94,32 @@
 				:	(idx == 8) ? BUFSIZE8 \
 				: BUFSIZE8
 
-
+// Header in each buffer
 typedef struct buf_header
 {
 	void* ptr;
 } bufHeader_t;
 
+// Header in page
 typedef struct mck2_header
 {
 	kma_size_t size;
-	int spaceUsed;
-	struct mck2_header* prev;
-	struct mck2_header* next;
+	int used;
+	struct mck2_header* prePagePtr;
+	struct mck2_header* nextPagePtr;
 	bufHeader_t* bufferPtr;
 } mck2Header_t;
 
 /************Global Variables*********************************************/
-
+// Pointer to the current page header
 mck2Header_t* mck2Ptr = NULL;
 
 /************Function Prototypes******************************************/
-
+// search the free buffer in pages
 mck2Header_t* searchFreelist(kma_size_t);
+
+// initialize the page header
 int initMck2(kma_size_t);
-kma_size_t convertIdxToSize(int);
 
 /************External Declaration*****************************************/
 
@@ -126,17 +128,26 @@ kma_size_t convertIdxToSize(int);
 void*
 kma_malloc(kma_size_t size)
 {
+	// check if the request is valid
 	if(size > PAGESIZE)
 	{
-		printf("ERROR: too large request!\n");
+		printf("ERROR: not enough space!\n");
 		return NULL;
 	}
+
+	// if no page is present in kernel
+	// initialize a new page
 	if(mck2Ptr == NULL)
 	{
 		if(initMck2(size))
+		{
+			printf("ERROR: too large size!\n");
 			return NULL;
+		}
 	}
 
+	// if the request size larger than half page
+	// return the whole page
 	if(size > MAXSPACE / 2)
 	{
 		kpage_t* page;
@@ -155,17 +166,17 @@ kma_malloc(kma_size_t size)
 
 	do{
 		reqNewPage = FALSE;
-		tempMck2Ptr = searchFreelist(reqSpace);
-		if(tempMck2Ptr == NULL)
+		tempMck2Ptr = searchFreelist(reqSpace);	// find the next free buffer
+		if(tempMck2Ptr == NULL)	// if no buffer available, initialize a new page
 		{
 			initMck2(size);
 			reqNewPage = TRUE;
 		}
-		else
+		else	// return a buffer from the page
 		{
 			bufPtr = tempMck2Ptr->bufferPtr;
 			tempMck2Ptr->bufferPtr = bufPtr->ptr;
-			tempMck2Ptr->spaceUsed += reqSpace;
+			tempMck2Ptr->used += reqSpace;
 			return (void*)bufPtr;
 		}
 	} while(reqNewPage);
@@ -175,6 +186,8 @@ kma_malloc(kma_size_t size)
 void
 kma_free(void* ptr, kma_size_t size)
 {
+	// if the return size larger than half page
+	// free the whole page
 	if(size > MAXSPACE / 2)
 	{
 		kpage_t* page = *((kpage_t**)((void*)ptr - sizeof(kpage_t*)));
@@ -182,44 +195,46 @@ kma_free(void* ptr, kma_size_t size)
 		return;
 	}
 
+	// find the page where the buffer is from
 	mck2Header_t* tempMck2Ptr = (mck2Header_t*)(((unsigned long)ptr & MASKOFFSET) + sizeof(kpage_t*));
 
 	if(tempMck2Ptr == NULL)
 	{
 		printf("ERROR: cannot find the return address!\n");
 	}
-	else
+	else	// return the buffer to the buffer list
 	{
 		int index = NDX(size);
 		kma_size_t reqSpace = SPACE(index);
 		bufHeader_t* bufPtr = (bufHeader_t*)ptr;
 		bufPtr->ptr = tempMck2Ptr->bufferPtr;
 		tempMck2Ptr->bufferPtr = bufPtr;
-		tempMck2Ptr->spaceUsed -= reqSpace;
+		tempMck2Ptr->used -= reqSpace;
 
-		if(tempMck2Ptr->spaceUsed == 0)
+		// if all buffers in that page are freed, return that page
+		if(tempMck2Ptr->used == 0)
 		{
 			mck2Header_t* tempPtr;
 			kpage_t* tempPagePtr;
-			if((tempMck2Ptr->prev == NULL) && (tempMck2Ptr->next != NULL))
+			if((tempMck2Ptr->prePagePtr == NULL) && (tempMck2Ptr->nextPagePtr != NULL)) // if the page is the first page in the list
 			{
-				tempPtr = tempMck2Ptr->next;
-				tempPtr->prev = NULL;
+				tempPtr = tempMck2Ptr->nextPagePtr;
+				tempPtr->prePagePtr = NULL;
 			}
-			else if((tempMck2Ptr->prev != NULL) && (tempMck2Ptr->next == NULL))
+			else if((tempMck2Ptr->prePagePtr != NULL) && (tempMck2Ptr->nextPagePtr == NULL)) // if the page is the last page in the list
 			{
-				tempPtr = tempMck2Ptr->prev;
-				tempPtr->next = NULL;
+				tempPtr = tempMck2Ptr->prePagePtr;
+				tempPtr->nextPagePtr = NULL;
 				mck2Ptr = tempPtr;
 			}
-			else if((tempMck2Ptr->prev != NULL) && (tempMck2Ptr->next != NULL))
+			else if((tempMck2Ptr->prePagePtr != NULL) && (tempMck2Ptr->nextPagePtr != NULL)) // if the page is in the middle of the list
 			{
-				tempPtr = tempMck2Ptr->prev;
-				tempPtr->next = tempMck2Ptr->next;
-				tempPtr = tempMck2Ptr->next;
-				tempPtr->prev = tempMck2Ptr->prev;
+				tempPtr = tempMck2Ptr->prePagePtr;
+				tempPtr->nextPagePtr = tempMck2Ptr->nextPagePtr;
+				tempPtr = tempMck2Ptr->nextPagePtr;
+				tempPtr->prePagePtr = tempMck2Ptr->prePagePtr;
 			}
-			else if((tempMck2Ptr->prev == NULL) && (tempMck2Ptr->next == NULL))
+			else if((tempMck2Ptr->prePagePtr == NULL) && (tempMck2Ptr->nextPagePtr == NULL)) // if it is the only page in the list
 			{
 				mck2Ptr = NULL;
 			}
@@ -229,6 +244,7 @@ kma_free(void* ptr, kma_size_t size)
 	}
 }
 
+// find a free buffer in the list
 mck2Header_t* searchFreelist(kma_size_t reqSpace)
 {
 	mck2Header_t* curMck2Ptr = mck2Ptr;
@@ -238,11 +254,12 @@ mck2Header_t* searchFreelist(kma_size_t reqSpace)
 		{
 			return curMck2Ptr;
 		}
-		curMck2Ptr = curMck2Ptr->prev;
+		curMck2Ptr = curMck2Ptr->prePagePtr;
 	}	
 	return NULL;
 }
 
+// initialize a new page
 int initMck2(kma_size_t size)
 {
 	int index = NDX(size);
@@ -261,21 +278,22 @@ int initMck2(kma_size_t size)
 	mck2Header_t* curMck2Ptr = (mck2Header_t*)((void*)page->ptr + sizeof(kpage_t*));
 	mck2Header_t* preMck2Ptr = mck2Ptr;
 	curMck2Ptr->size = reqSpace;
-	curMck2Ptr->spaceUsed = 0;
+	curMck2Ptr->used = 0;
 	curMck2Ptr->bufferPtr = NULL;
 
-	if(mck2Ptr == NULL)
+	if(mck2Ptr == NULL) // if it is the first page
 	{
-		curMck2Ptr->prev = NULL;
-		curMck2Ptr->next = NULL;
+		curMck2Ptr->prePagePtr = NULL;
+		curMck2Ptr->nextPagePtr = NULL;
 	}
 	else
 	{
-		curMck2Ptr->prev = preMck2Ptr;
-		curMck2Ptr->next = NULL;
-		preMck2Ptr->next = curMck2Ptr;
+		curMck2Ptr->prePagePtr = preMck2Ptr;
+		curMck2Ptr->nextPagePtr = NULL;
+		preMck2Ptr->nextPagePtr = curMck2Ptr;
 	}
 
+	// cut the whole page into the same size buffer
 	bufHeader_t* tempBufPtr = (bufHeader_t*)((void*)curMck2Ptr	+ sizeof(mck2Header_t));
 	kma_size_t totalSpace = 0;
 	while (totalSpace+reqSpace <= MAXSPACE)
@@ -287,31 +305,5 @@ int initMck2(kma_size_t size)
 	}
 	mck2Ptr = curMck2Ptr;
 	return 0;
-}
-
-kma_size_t convertIdxToSize(int index)
-{
-	switch(index)
-	{
-		case 0:
-			return (kma_size_t) BUFSIZE0;
-		case 1:
-			return (kma_size_t) BUFSIZE1;
-		case 2:
-			return (kma_size_t) BUFSIZE2;
-		case 3:
-			return (kma_size_t) BUFSIZE3;
-		case 4:
-			return (kma_size_t) BUFSIZE4;
-		case 5:
-			return (kma_size_t) BUFSIZE5;	
-		case 6:
-			return (kma_size_t) BUFSIZE6;	
-		case 7:
-			return (kma_size_t) BUFSIZE7;	
-		case 8:
-		default:
-			return (kma_size_t) BUFSIZE8;
-	}
 }
 #endif // KMA_MCK2
