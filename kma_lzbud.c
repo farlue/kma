@@ -56,9 +56,10 @@
  *  variables should be in all lower case. When initializing
  *  structures and arrays, line everything up in neat columns.
  */
+
 /* buffer size, number of buffer types, and page header sizes */
 #define MINBUFSIZE 32
-#define MAXBUFCLASS (int)log2(PAGESIZE / MINBUFSIZE)
+#define MAXBUFCLASS 8
 #define FIRSTPAGEHEADERSIZE (sizeof(pageHeader_t) + sizeof(buddyFreeLists_t))
 #define PAGEHEADERSIZE (sizeof(pageHeader_t))
 
@@ -152,7 +153,7 @@ remove_buffer_from_free_list(bufferHeader_t* bufHdrPtr, unsigned char bufClass);
 void
 update_bitmap(void* pagePtr, void* bufPtr, kma_size_t bufSize, bool status);
 int
-lookup_bitmap(void* pagePtr, kma_size_t bufStartAddr, kma_size_t bufSize);
+lookup_bitmap(void* pagePtr, kma_size_t bufStartAddr);
 kma_size_t
 get_roundup(kma_size_t reqSize);
 
@@ -163,14 +164,15 @@ get_roundup(kma_size_t reqSize);
 void*
 kma_malloc(kma_size_t size)
 {
-  /*printf("requested malloc size: %d\n", size);*/
-
+  /* cannot allocate more than 1 page */
   if (size > PAGESIZE) {
     error("requested size is larger than PAGESIZE.", "");
     return NULL;
   }
 
+  /* initialize the central data structure */
   if (budfls == NULL) {
+    /* if size is too large for keeping a page header, return */
     if (!init(size)) {
       return NULL;
     }
@@ -188,13 +190,9 @@ kma_malloc(kma_size_t size)
 void 
 kma_free(void* ptr, kma_size_t size)
 {
-  /*  printf("requested free size: %d\n", size);
-  if (size == 299) {
-    printf("freeing #84: 266");
-    }*/
-
   void* pagePtr = ptr - ((long)ptr % PAGESIZE);
  
+  /* buffer occupies one page; free the page */
   if (size > PAGESIZE / 2) {
     kpage_t* page;
     page = *((kpage_t**)(pagePtr));
@@ -203,15 +201,14 @@ kma_free(void* ptr, kma_size_t size)
     void* firstPagePtr = budfls->firstPagePtr;
     kma_size_t firstPageSpaceUsed = ((pageHeader_t*)(budfls->firstPagePtr))->spaceUsed;
     short pagesUsed = budfls->pagesUsed;
-
-    /*printf("free: page %lx with space used %d\n", (unsigned long)pagePtr, ((pageHeader_t*)pagePtr)->spaceUsed);
-      printf("freeing page %lx\n", (unsigned long)(pagePtr));*/
     free_page(page);
-
+    /* if the freed page is the second last page, 
+     * and the last page (with the central information) is empty,
+     * free the last page also.
+     */
     if (pagePtr != firstPagePtr) {
       if (firstPageSpaceUsed == 0 &&
 	  pagesUsed == 1) {
-	/*printf("freeing first page %lx\n", (unsigned long)firstPagePtr);*/
 	free_page(((pageHeader_t*)firstPagePtr)->page);
 	budfls = NULL;
       }
@@ -223,18 +220,12 @@ kma_free(void* ptr, kma_size_t size)
 
   kma_size_t bufSize = get_roundup(size);
   int bufClass = (int)get_buf_class(bufSize);
-  //kma_size_t bufStartAddr = ptr - pagePtr;
-
   ((pageHeader_t*)pagePtr)->spaceUsed -= bufSize;
-  /*if (size == 2491) {
-    printf("\n");
-    }
-
-    printf("free: page %lx with space used %d\n", (unsigned long)pagePtr, ((pageHeader_t*)pagePtr)->spaceUsed);*/
-
+  /* free an empty page */
   if (((pageHeader_t*)pagePtr)->spaceUsed == 0) {
     kma_size_t sizeFreed;
     if (pagePtr == budfls->firstPagePtr) {
+      /* if there are other pages, do not free the page with central information */
       if (budfls->pagesUsed > 1) {
 	lazy_coalesce(pagePtr, ptr, bufClass, bufSize);
 	return;
@@ -244,12 +235,10 @@ kma_free(void* ptr, kma_size_t size)
     } else {
       sizeFreed = get_roundup(PAGEHEADERSIZE);
     }
-
+    /* remove all buffers on this page from free lists */
     bufferHeader_t* bufPtr = pagePtr + sizeFreed;
-
     while (sizeFreed < PAGESIZE) {
       if ((void*)bufPtr != ptr) {
-
 	kma_size_t size = get_buf_size(bufPtr->bufClass);
 	sizeFreed += size;
 	remove_buffer_from_free_list(bufPtr, bufPtr->bufClass);
@@ -262,13 +251,14 @@ kma_free(void* ptr, kma_size_t size)
     assert(bufPtr == pagePtr + PAGESIZE);
     budfls->pagesUsed--;
     void* firstPagePtr = budfls->firstPagePtr;
-    /*printf("freeing page %lx\n", (unsigned long)(pagePtr));*/
     free_page(*((kpage_t**)pagePtr));
-
+    /* if the freed page is the second last page, 
+     * and the last page (with the central information) is empty,
+     * free the last page also.
+     */
     if (pagePtr != firstPagePtr) {
       if (((pageHeader_t*)(budfls->firstPagePtr))->spaceUsed == 0 &&
 	  budfls->pagesUsed == 1) {
-	/*printf("freeing page %lx\n", (unsigned long)(budfls->firstPagePtr));*/
 	free_page(((pageHeader_t*)(budfls->firstPagePtr))->page);
 	budfls = NULL;
       }
@@ -278,8 +268,7 @@ kma_free(void* ptr, kma_size_t size)
 
     return;
   }
-
-  //add_buffer_to_free_list(pagePtr, get_buf_class(size), (int)(ptr - pagePtr), bufSize);
+  /* lazy coalesce the freed buffer */
   lazy_coalesce(pagePtr, ptr, bufClass, bufSize);
 }
 
@@ -294,8 +283,7 @@ init(kma_size_t size)
   kpage_t* page = get_page();
   *((kpage_t**)page->ptr) = page;
 
-  //((pageHeader_t*)page->ptr)->pageNo = 0;
-
+  /* initialize central information */
   budfls = page->ptr + PAGEHEADERSIZE;
   budfls->pagesUsed = 1;
   budfls->firstPagePtr = page->ptr;
@@ -317,8 +305,9 @@ init(kma_size_t size)
 void
 header_alloc(void* pagePtr, kma_size_t headerSize)
 {
+  /* make room for the page header */
   get_buffer_from_large_buffer(pagePtr, headerSize, 0, PAGESIZE, 0);
-  //update bitmap
+  /* update bitmap to all 0 */
   memset(pagePtr + sizeof(kpage_t*), '\000', MAXBITMAPSEGS);
   ((pageHeader_t*)pagePtr)->spaceUsed = 0;
 }
@@ -329,7 +318,7 @@ big_size_alloc(kma_size_t reqSize)
   kpage_t* page = get_page();
   *((kpage_t**)page->ptr) = page;
   budfls->pagesUsed++;
-
+  /* for buffer larger than half page, allocate a whole new page*/
   return page->ptr + sizeof(kpage_t*) + sizeof(bitMap_t);
 }
 
@@ -340,9 +329,11 @@ buddy_alloc(kma_size_t reqSize)
   int reqBufClass = (int)get_buf_class(reqBufSize);
   int bufClass = reqBufClass;
   void* bufPtr;
+  /* find available buffer on free lists */
   while ((budfls->fl[bufClass]).ptr == NULL && bufClass >= 0) {
     bufClass--;
   }
+  /* buffer found */
   if (bufClass == reqBufClass) {
     bufPtr = (budfls->fl[bufClass]).ptr;
     remove_buffer_from_free_list((budfls->fl[bufClass]).ptr, bufClass);
@@ -350,14 +341,13 @@ buddy_alloc(kma_size_t reqSize)
 	update_bitmap(((bufferHeader_t*)bufPtr)->pagePtr, bufPtr, reqBufSize, USED);
     }
   } else {
-    if (bufClass < 0) {
+    if (bufClass < 0) { /* no buffer large enough for requested size, need new page */
       kpage_t* page = get_page();
       *((kpage_t**)page->ptr) = page;
-      //((pageHeader_t*)page->ptr)->pageNo = 1;
       budfls->pagesUsed++;
       header_alloc(page->ptr, PAGEHEADERSIZE);
       return buddy_alloc(reqSize);
-    } else {
+    } else { /* need to split a larger buffer */
       bufPtr = (budfls->fl[bufClass]).ptr;
       remove_buffer_from_free_list((budfls->fl[bufClass]).ptr, bufClass);
       unsigned char delayed = ((bufferHeader_t*)bufPtr)->delayed;
@@ -369,9 +359,8 @@ buddy_alloc(kma_size_t reqSize)
       }
     }
   }
-
+  /* update metadata */
   ((pageHeader_t*)(((bufferHeader_t*)bufPtr)->pagePtr))->spaceUsed += reqBufSize;  
-
   (budfls->bs[reqBufClass]).active ++;
   ((bufferHeader_t*)bufPtr)->bufClass = -1;  
   return bufPtr;
@@ -381,11 +370,12 @@ void
 lazy_coalesce(void* pagePtr, void* bufPtr, int bufClass, kma_size_t bufSize)
 {
   short slack = (budfls->bs[bufClass]).active - (budfls->bs[bufClass]).locFree;
+  /* lazy state: add a delayed buffer to free list and return */
   if (slack > 1) {
     add_buffer_to_free_list_front(pagePtr, (unsigned char)bufClass, 1, (int)(bufPtr - pagePtr), bufSize);        
     (budfls->bs[bufClass]).locFree ++;
     return;
-  } else {
+  } else { /* reclaiming or accelerated state: coalesce */
     coalesce(pagePtr, bufPtr, bufSize);
   }
 }
@@ -398,41 +388,47 @@ coalesce(void* pagePtr, void* bufPtr, kma_size_t bufSize)
   void* buddyPtr = bufStartAddr % (bufSize * 2) == bufSize ?
     bufPtr - bufSize : bufPtr + bufSize;
   kma_size_t buddyStartAddr = buddyPtr - pagePtr;
-  int buddyUsed = lookup_bitmap(pagePtr, buddyStartAddr, bufSize);
+  int buddyUsed = lookup_bitmap(pagePtr, buddyStartAddr);
   short slack = (budfls->bs[(int)bufClass]).active - (budfls->bs[(int)bufClass]).locFree;
+  /* lazy state: add a delayed buffer to free list and return */
   if (slack > 1) {
     add_buffer_to_free_list_front(pagePtr, bufClass, 1, bufStartAddr, bufSize);
     (budfls->bs[(int)bufClass]).locFree ++;
     return &(budfls->fl[(int)bufClass]);
   } 
+  /* reclaiming state: update bitmap and try to coalesce */
   if (slack == 1) {
     update_bitmap(pagePtr, bufPtr, bufSize, FREE);
+    /* do not coalesce with the page header buffer */
     if (buddyPtr == pagePtr) {
       add_buffer_to_free_list_back(pagePtr, bufClass, 0, bufStartAddr, bufSize);
       return &(budfls->fl[(int)bufClass]);
     }
+    /* try to find a globally free buddy and coalesce */
     if (buddyUsed == 0 && ((bufferHeader_t*)buddyPtr)->bufClass == bufClass) {
       remove_buffer_from_free_list((bufferHeader_t*)buddyPtr, bufClass);
       void* bigBufPtr = bufPtr < buddyPtr ? bufPtr : buddyPtr;
       return coalesce(pagePtr, bigBufPtr, bufSize * 2);
-    } else {
+    } else { /* coalescing stops */
       add_buffer_to_free_list_back(pagePtr, bufClass, 0, bufStartAddr, bufSize);
       return &(budfls->fl[(int)bufClass]);
     }
   }
+  /* accelerated state: do not update bitmap; coalesce with delayed buddy */
   if (buddyPtr == pagePtr) {
     add_buffer_to_free_list_front(pagePtr, bufClass, 1, bufStartAddr, bufSize);
     (budfls->bs[(int)bufClass]).locFree ++;
     return &(budfls->fl[(int)bufClass]);
   }
+  /* find delayed buddy in free lists */
   bufferHeader_t* buddyHdrPtr = find_buffer_in_free_list(pagePtr, buddyPtr,
 							 bufClass, 1);
-  if (buddyHdrPtr != NULL) {
+  if (buddyHdrPtr != NULL) { /* coalesce */
     remove_buffer_from_free_list((bufferHeader_t*)buddyPtr, bufClass);
     (budfls->bs[(int)bufClass]).locFree --;
     void* bigBufPtr = bufPtr < buddyPtr ? bufPtr : buddyPtr;
     return coalesce(pagePtr, bigBufPtr, bufSize * 2);
-  } else {
+  } else { /* coalescing stops */
     add_buffer_to_free_list_front(pagePtr, bufClass, 1, bufStartAddr, bufSize);
     (budfls->bs[(int)bufClass]).locFree ++;
     return &(budfls->fl[(int)bufClass]);
@@ -442,12 +438,14 @@ coalesce(void* pagePtr, void* bufPtr, kma_size_t bufSize)
 unsigned char
 get_buf_class(kma_size_t bufSize)
 {
+  /* translate the buffer size to a buffer class */
   return (unsigned char)((int)log2(PAGESIZE / bufSize) - 1);
 }
 
 kma_size_t
 get_buf_size(unsigned char bufClass)
 {
+  /* translate a buffer class to a buffer size */
   return pow(2, MAXBUFCLASS - 1 - (int)bufClass) * MINBUFSIZE;
 }
 
@@ -458,6 +456,7 @@ get_buffer_from_large_buffer(void* pagePtr, kma_size_t reqBufSize, unsigned char
   kma_size_t bufSize = largeBufSize / 2;
   int bufClass = (int)get_buf_class(bufSize); // get the class of the buffer
   kma_size_t freeBufStartAddr;
+  /* split and put the buddies into free lists */
   while (bufSize >= MINBUFSIZE) {
     freeBufStartAddr = largeBufStartAddr + bufSize;
     if (delayed) {
@@ -479,6 +478,7 @@ bufferHeader_t*
 find_buffer_in_free_list(void* pagePtr, void* bufPtr, unsigned char bufClass,
 			 unsigned char delayed)
 {
+  /* find a buffer in a free list using its address and buffer class */
   bufferHeader_t* bufHdrPtr = (budfls->fl[(int)bufClass]).ptr; // find a buffer in a free list
   while (bufHdrPtr != NULL) {
     if ((void*)bufHdrPtr == bufPtr && bufHdrPtr->delayed == delayed) {
@@ -496,6 +496,7 @@ void
 add_buffer_to_free_list_front(void* pagePtr, unsigned char bufClass, unsigned char delayed,
 			     kma_size_t bufStartAddr, kma_size_t bufSize)
 {
+  /* add a buffer to the front of a free list */
   bufferHeader_t* flhead = (budfls->fl[(int)bufClass]).ptr; // put the buffer into a free list
   bufferHeader_t* bufHdrPtr = (bufferHeader_t*)(pagePtr + bufStartAddr);
   bufHdrPtr->nextBuffer = flhead;
@@ -503,6 +504,7 @@ add_buffer_to_free_list_front(void* pagePtr, unsigned char bufClass, unsigned ch
   bufHdrPtr->pagePtr = pagePtr;
   bufHdrPtr->bufClass = bufClass;
   bufHdrPtr->delayed = delayed;
+  /* update the free list's head and tail */
   if (flhead != NULL) {
     flhead->prevBuffer = bufHdrPtr;
   } else {
@@ -515,6 +517,7 @@ void
 add_buffer_to_free_list_back(void* pagePtr, unsigned char bufClass, unsigned char delayed,
 			     kma_size_t bufStartAddr, kma_size_t bufSize)
 {
+  /* add a buffer to the back of a free list */
   bufferHeader_t* fltail = (budfls->fl[(int)bufClass]).tail; // put the buffer into a free list
   bufferHeader_t* bufHdrPtr = (bufferHeader_t*)(pagePtr + bufStartAddr);
   bufHdrPtr->prevBuffer = fltail;
@@ -522,6 +525,7 @@ add_buffer_to_free_list_back(void* pagePtr, unsigned char bufClass, unsigned cha
   bufHdrPtr->pagePtr = pagePtr;
   bufHdrPtr->bufClass = bufClass;
   bufHdrPtr->delayed = delayed;
+  /* update the free list's head and tail */
   if (fltail != NULL) {
     fltail->nextBuffer = bufHdrPtr;
   } else {
@@ -560,8 +564,13 @@ update_bitmap(void* pagePtr, void* bufPtr, kma_size_t bufSize, bool status)
   unsigned char mask = 0xff;
   bitMap_t* bitMapLoc = pagePtr + sizeof(kpage_t*);
   kma_size_t bufStartAddr = (long)bufPtr - (long)pagePtr;
+  /* the 256 bits bitmap is stored in 8 unsigned chars;
+   * segNo is the index of a char;
+   * bitNo is the index of a bit in the char.
+   */
   int segNo = (bufStartAddr / MINBUFSIZE) / BITSPERCHAR;
   int bitNo = (bufStartAddr / MINBUFSIZE) % BITSPERCHAR;
+  /* small sized buffers, need a mask */
   if (totalBits < BITSPERCHAR) {
     for (i = bitNo; i < bitNo + totalBits; i++) {
       mask -= 1 << i;
@@ -573,50 +582,31 @@ update_bitmap(void* pagePtr, void* bufPtr, kma_size_t bufSize, bool status)
     }
     return;
   }
-
+  /* big chunk buffers, set the whole char */
   if (status == FREE) {
     memset((void*)bitMapLoc + segNo, '\000', totalBits / BITSPERCHAR);
   } else {
     memset((void*)bitMapLoc + segNo, '\377', totalBits / BITSPERCHAR);
   }
 
-  /*printf("page %lx bitMap after size %d: ", (unsigned long)pagePtr, bufSize);
-  for (i = 0; i < MAXBITMAPSEGS; i++) {
-    printf("%x ", (unsigned int)bitMapLoc->bitSegments[i]);
-  }
-  printf(" -- %ld; %d\n", sizeof(bitMap_t), i);
-  printf(" ");*/
 }
 
 int
-lookup_bitmap(void* pagePtr, kma_size_t bufStartAddr, kma_size_t bufSize)
+lookup_bitmap(void* pagePtr, kma_size_t bufStartAddr)
 {
-  /*int totalBits = bufSize / MINBUFSIZE;
-  int i;
-  unsigned char mask = 0xff;
-  bitMap_t* bitMapLoc = pagePtr + sizeof(kpage_t*);
-  void* bufPtr = pagePtr + bufStartAddr;
-  int used = 0;*/
   bitMap_t* bitMapLoc = pagePtr + sizeof(kpage_t*);
   int segNo = (bufStartAddr / MINBUFSIZE) / BITSPERCHAR;
   int bitNo = (bufStartAddr / MINBUFSIZE) % BITSPERCHAR;
+  /* look at the first bit is enough */
   return (int)(bitMapLoc->bitSegments[segNo] & (1 << bitNo));
-  /*if (totalBits < BITSPERCHAR) {
-    for (i = bitNo; i < bitNo + totalBits; i++) {
-      mask -= 1 << i;
-    }
-    used = bitMapLoc->bitSegments[segNo] & ~mask;
-    return used;
-  }
-  for (i = 0; i < totalBits / BITSPERCHAR; i ++) {
-    used |= bitMapLoc->bitSegments[segNo + i];
-  }
-  return used;*/
 }
 
 kma_size_t
 get_roundup(kma_size_t reqSize)
 {
+  /* round up the given size to the next power of 2,
+   * with its minimum being MINBUFSIZE (32)
+   */
   if (reqSize < MINBUFSIZE) {
     return MINBUFSIZE;
   }

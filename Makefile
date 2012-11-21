@@ -11,7 +11,7 @@
 ###############################################################################
 
 # handin info
-TEAM = `whoami`
+TEAM = "yfw492-cya410-flu566"
 VERSION = `date +%Y%m%d%H%M%S`
 PROJ = kma
 
@@ -24,8 +24,8 @@ RM = rm
 MKDIR = mkdir
 TAR = tar cvf
 COMPRESS = gzip
-#CFLAGS = -g -Wall -O2 -D_GNU_SOURCE -lm
-CFLAGS = -g -Wall -D_GNU_SOURCE -lm -pg
+CFLAGS = -g -Wall -O2 -D_GNU_SOURCE -lm
+#CFLAGS = -g -Wall -D_GNU_SOURCE -lm -pg
 
 DELIVERY = Makefile *.h *.c DOC
 PROGS = kma_dummy kma_rm kma_p2fl kma_mck2 kma_bud kma_lzbud
