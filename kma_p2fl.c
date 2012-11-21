@@ -90,12 +90,13 @@
 				:	(idx == 8) ? BUFSIZE8 \
 				: BUFSIZE8;
 
-
+// Buffer header on the top of each buffer
 typedef struct buffer_header
 {
 	void* ptr;
 } bufHeader_t;
 
+// Header in each page right after the page pointer
 typedef struct k_freelist
 {
 	int spaceUsed;
@@ -106,13 +107,19 @@ typedef struct k_freelist
 } kflHeader_t;
 
 /************Global Variables*********************************************/
-
+// Pointer to the current page header
 kflHeader_t* kflPtr = NULL;
 
 /************Function Prototypes******************************************/
-
+// Initialize the header in the new page
+// Also, contains the freelist of all available buffers
 int initKFL(kma_size_t);
+
+// free all pages
 void cleanupKFL();
+
+// If the space left in the page cannot meet the request
+// cut the space into smaller size and put them on freelist
 void allocSpaceLeft(int);
 /************External Declaration*****************************************/
 
@@ -121,17 +128,23 @@ void allocSpaceLeft(int);
 void*
 kma_malloc(kma_size_t size)
 {
+	// Check if the request is valid
 	if(size > MAXSPACE)
 	{
 		printf("ERROR: too large request!\n");
 		return NULL;
 	}
+
+	// If no page is present in kernel
+	// get a new page and initialize the header
 	if(kflPtr == NULL)
 	{
 		if(initKFL(size))
 			return NULL;
 	}
 
+	// If the request size is larger than half page
+	// simply return a whole page
 	if(size > MAXSPACE / 2)
 	{
 		kpage_t* page;
@@ -140,6 +153,7 @@ kma_malloc(kma_size_t size)
 		return page->ptr + sizeof(kpage_t*);
 	}
 	
+	// Roundup the size and calculate the index and size
 	int index = NDX(size + sizeof(bufHeader_t));
 	kma_size_t reqSpace = SPACE(index);
 	bufHeader_t* bufPtr;
@@ -148,29 +162,27 @@ kma_malloc(kma_size_t size)
 
 	do {
 		reqNewPage = FALSE;
-		if(kflPtr->p2fl[index] == NULL)
+		if(kflPtr->p2fl[index] == NULL)		// No avalible buffer in freelist
 		{
-			if((reqSpace <= kflPtr->freespaceSize))
+			if((reqSpace <= kflPtr->freespaceSize)) // cut a buffer from the current page
 			{
 				bufPtr = (bufHeader_t*) kflPtr->freespacePtr;
-//				bufPtr->ptr = kflPtr->p2fl[index];
 				kflPtr->freespaceSize -= reqSpace;
 				kflPtr->freespacePtr += reqSpace;
 				kflPtr->spaceUsed += reqSpace;
 				return (void*)bufPtr + sizeof(bufHeader_t);
 			}
-			else
+			else	// get a new page and initialize the header
 			{
 				allocSpaceLeft(index-1);
 				initKFL(size);
 				reqNewPage = TRUE;
 			}
 		}
-		else
+		else	// remove the buffer from the freelist and return it
 		{
 			bufPtr = kflPtr->p2fl[index];
 			kflPtr->p2fl[index] = (bufHeader_t*)bufPtr->ptr;
-//			bufPtr->ptr = (void*)&kflPtr->p2fl[index];
 			kflPtr->spaceUsed += (int)reqSpace;
 			return (void*)bufPtr + sizeof(bufHeader_t);
 		}
@@ -181,6 +193,8 @@ kma_malloc(kma_size_t size)
 void
 kma_free(void* ptr, kma_size_t size)
 {
+	// return size is larger than half page
+	// simply free the page
 	if(size > MAXSPACE / 2)
 	{
 		kpage_t* page = *((kpage_t**)((void*)ptr - sizeof(kpage_t*)));
@@ -188,6 +202,7 @@ kma_free(void* ptr, kma_size_t size)
 		return;
 	}
 
+	// put the return buffer into the freelist
 	int index = NDX(size + sizeof(bufHeader_t));
 	kma_size_t reqSpace = SPACE(index);
  	bufHeader_t* bufPtr;
@@ -195,9 +210,12 @@ kma_free(void* ptr, kma_size_t size)
 	bufPtr->ptr = kflPtr->p2fl[index];
 	kflPtr->p2fl[index] = bufPtr;
 	kflPtr->spaceUsed -= reqSpace;
+
+	// if all buffers are returned, free all pages
 	cleanupKFL();
 }
 
+// put the rest of the page into the freelist
 void
 allocSpaceLeft(int index)
 {
@@ -216,6 +234,8 @@ allocSpaceLeft(int index)
 		index--;
 	}
 }
+
+// free all pages in kernel
 void
 cleanupKFL()
 {
@@ -233,6 +253,7 @@ cleanupKFL()
 	}
 }
 
+// initialize the new page
 int initKFL(kma_size_t size)
 {
 	kpage_t* page;
@@ -246,6 +267,7 @@ int initKFL(kma_size_t size)
 		return -1;
 	}
 	
+	// initialize the header in the new page
 	kflHeader_t* curKflPtr;
 	kflHeader_t* preKflPtr;
 	curKflPtr = page->ptr + sizeof(kpage_t*);
@@ -265,7 +287,9 @@ int initKFL(kma_size_t size)
 		curKflPtr->spaceUsed = preKflPtr->spaceUsed;
 		curKflPtr->prev = preKflPtr;
 	}
-	
+
+	// initialize the freelist
+	// copy the free buffer pointers into the current page
 	int i;
 	for(i=0; i<MAXSET; ++i)
 	{
